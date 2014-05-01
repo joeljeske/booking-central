@@ -81,13 +81,15 @@ angular.module("sforceRemoting", []).
 				//Create a simple function for each action available
 				__api[action] = apiFunction(action);
 			}
+
 			
 			function apiFunction(name){
+
 				return function(){
 					return performFunction(name, Array.prototype.slice.call(arguments)); 
 				}
 			}
-			
+
 			return __api;
 		}];
 	});

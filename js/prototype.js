@@ -37,6 +37,10 @@ XDate.max = function(d1, d2){
 	return d1.getTime() > d2.getTime() ? d1 : d2;
 }
 
+XDate.beginningOfTime = function(){
+	return new XDate(0);
+}
+
 /*
  * This class takes an array of items and iterates through them. 
  * 

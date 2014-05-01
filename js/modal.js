@@ -1,6 +1,6 @@
 /*
  * @license
- * angular-modal v0.2.1
+ * angular-modal v0.3.0
  * (c) 2013 Brian Ford http://briantford.com
  * License: MIT
  */
@@ -8,10 +8,9 @@
 'use strict';
 
 angular.module('btford.modal', []).
-factory('btfModal', function ($compile, $rootScope, $controller, $q, $http, $templateCache) {
+factory('btfModal', function ($animate, $compile, $rootScope, $controller, $q, $http, $templateCache) {
   return function modalFactory (config) {
-
-    if ((+!!config.template) + (+!!config.templateUrl) !== 1) {
+    if (!(!config.template ^ !config.templateUrl)) {
       throw new Error('Expected modal to have exacly one of either `template` or `templateUrl`');
     }
 
@@ -19,8 +18,7 @@ factory('btfModal', function ($compile, $rootScope, $controller, $q, $http, $tem
         controller    = config.controller || angular.noop,
         controllerAs  = config.controllerAs,
         container     = angular.element(config.container || document.body),
-        initCb	 	  = config.init || angular.noop,
-        beforeDestroy = config.beforeDestory || angular.noop,
+        deferred	  = null,
         element       = null,
         html,
         scope;
@@ -39,16 +37,25 @@ factory('btfModal', function ($compile, $rootScope, $controller, $q, $http, $tem
     }
 
     function activate (locals) {
+      deferred = $q.defer();
+    
       html.then(function (html) {
         if (!element) {
-          attach(html, locals);
+          attach(html, locals);            
         }
+      }, function(){
+          return deferred.reject();      
       });
+      
+      return deferred.promise;
     }
 
     function attach (html, locals) {
       element = angular.element(html);
-      container.prepend(element);
+      if (element.length === 0) {
+        throw new Error('The template contains no elements; you need to wrap text nodes')
+      }
+      $animate.enter(element, container);
       scope = $rootScope.$new();
       if (locals) {
         for (var prop in locals) {
@@ -60,15 +67,15 @@ factory('btfModal', function ($compile, $rootScope, $controller, $q, $http, $tem
         scope[controllerAs] = ctrl;
       }
       $compile(element)(scope);
-      initCb(element);      
     }
 
-    function deactivate () {
+    function deactivate (exitCode) {
       if (element) {
-        scope.$destroy();
-    	beforeDestroy(element);
-        element.remove();
-        element = null;
+        $animate.leave(element, function () {
+          scope.$destroy();        
+          element = null;
+          deferred.resolve(exitCode);        
+        });
       }
     }
 

@@ -41,6 +41,10 @@ angular.module('bookingCentral.services', ["sforceRemoting", "btford.modal"]).
 			//If there is not a end date but a period, set the end date as the start date + number of days in period
 			if(period && !stop) this.__stop = new XDate(this.__start).addDays(period);
 			
+			//Make a function to reset the period to the current day
+			this.today = function(){
+				this.__start.setTime(XDate.today().getTime());
+			}
 		
 			//Make a range shifter by day
 			this.addDays = function(d){
@@ -68,12 +72,22 @@ angular.module('bookingCentral.services', ["sforceRemoting", "btford.modal"]).
 		}
 		
 		var r = Range.prototype;
-		
+
+		Object.defineProperty(r, "startPretty", {
+			get: function( ) { return this.__start.toString('MMMM dd, yyyy') },
+			set: function(s) { this.__start.setTime(new XDate(s).getTime()); }
+		});   
+				
 		Object.defineProperty(r, "start", {
 			get: function( ) { return this.__start },
 			set: function(s) { this.__start.setTime(new XDate(s).getTime()); }
 		});   
 		
+		Object.defineProperty(r, "stopPretty", {
+			get: function( ) { return this.__stop.toString('MMMM dd, yyyy') },
+			set: function(e) { this.__stop.setTime(new XDate(e).getTime()); }
+		});   
+					
 		Object.defineProperty(r, "stop", {
 			get: function( ) { return this.__stop },
 			set: function(e) { this.__stop.setTime(new XDate(e).getTime()); }
@@ -98,12 +112,10 @@ angular.module('bookingCentral.services', ["sforceRemoting", "btford.modal"]).
 	// The goal of this service is to ask it for a date range and it would request the data from the 
 	// salesforce remoting module. It would format the data as expected by the requester (probably a 
 	// controller). 
-	service("bookingsDataManager", ["salesforce", "buildingNormalizer", function(sf, normalizer){
-		//Holds the booking reference when clicked. Shares data to the modal 
-		this.booking = {};
-		
-		//Could/Should we cache bookings here?
-		//this.__bookings = {};
+	service("bookingsDataManager", ["salesforce", "buildingNormalizer", "$q", function(sf, normalizer, $q){
+		//Default all the api functions to 'this'
+		angular.extend(this, sf);
+
 		
 		//There is no need for a wrapper for this ajax service
 		this.getDetailedBooking = function(id){	
@@ -114,24 +126,101 @@ angular.module('bookingCentral.services', ["sforceRemoting", "btford.modal"]).
 				return booking;		
 			});
 		}
-		//Function to get bookings formatted properly for the given date range
-		this.getBookings = function(start, end){
 		
-			var s = new XDate(start);
-			var e = new XDate(end);
-						
-			//Return a sequential promise;
-			return sf.getBookings(s.toUTCString(), e.toUTCString()).
+		this.create = function(booking, resources){
+			return sf.create(booking, resources).then(function(result){
+				if(result && result.length)
+					return $q.reject(result);
+			});
+		}
+		
+		//Cache booking data
+		var __bookingsData;	
 			
-				then(function(result){
-					//Pass the data to the normalizer as an object
-					var data = JSON.parse(result);
-						
-					//Format the data as the requester would suspect it.
-					var normed = normalizer(data, s, e);
-					return normed;
+		//Function to get bookings formatted properly for the given date range
+		this.getBookings = function(start, end, resourceIds){
+			//Are we doing a partial fetch or a full fetch for only some resources
+			var partialFetch = __bookingsData && Array.isArray(resourceIds) && resourceIds.length;
+			
+			var startStr = start.toUTCString();
+			var endStr = end.toUTCString();
+			
+			//Pass an empty array for a partial fetch
+			var promise = sf.getBookings(startStr, endStr, partialFetch ? resourceIds : []);
+
+			if(partialFetch)
+			{
+				//Return a sequential promise;
+				promise = promise.then(function(result){
+					
+					//Loop through all the buildings
+					angular.forEach(result, function(building){
+						//Loop through all the resources
+						angular.forEach(building.resources, function(resource){
+							//Get the old resource to simply replace data
+							var oldResource = __bookingsData.resources[resource.id];
+							//Normalize the new resource just fetched
+							normalizer(resource, start, end, __bookingsData.bookings);
+							//This overwrites the old data with a pointer to the new data
+							angular.extend(oldResource, resource);
+						});
+					});
+					
+					return __bookingsData;
 				});
+			}
+			else
+			{
+				//Return a sequential promise;
+				promise = promise.then(function(result){
+					//Reset cache variable. We are doing a full fetch
+					__bookingsData = {
+						bookings: {},      //Booking ID -> Booking
+						resources: {},     //Resource ID -> Resource
+						buildings: result  //Array of Buildings
+					};
+					
+					//Loop through all the buildings and normalize the resources
+					angular.forEach(__bookingsData.buildings, function(building){
+						angular.forEach(building.resources, function(resource){
+							//Normalize the resources for this building
+							normalizer(resource, start, end, __bookingsData.bookings);
+							//Add a quick lookup
+							__bookingsData.resources[resource.id] = resource;
+						});
+					});
+	
+					return __bookingsData;
+				});
+			}
 			
+			return promise;
+		}
+		
+		this.moveBooking = function(b,r){
+			return sf.moveBooking(b,r).then(function(result){
+				if(result === true)
+					return true;
+				else 
+					return $q.reject();
+			});	
+		}
+		
+		//Cached options
+		var __statusOptions;
+		this.statusOptions = function(){
+			if(__statusOptions && __statusOptions.length) //There is a cached option
+			{
+				 var defer = $q.defer();
+				 defer.resolve(__statusOptions);
+				 return defer.promise;
+			}
+			else
+			{
+				var promise = sf.statusOptions();
+				promise.then(function(r){ __statusOptions = r;}); //Cache result
+				return promise;	
+			}
 		}
 	}]).
 
@@ -152,77 +241,64 @@ angular.module('bookingCentral.services', ["sforceRemoting", "btford.modal"]).
 		
 		//Called with the booking object, the start and end dates of the period
 		function Booking(b, start, end){
-			this.nights = XDate.max(start, b.checkin).diffDays(XDate.min(end, b.checkout));
-			this.weekend = false; //It might be a weekend but it will have color of its own
-		
-			//Merge the two objects into a new object- the parameter takes precedince
-			angular.extend(this, b);				
+			b.nights = XDate.max(start, b.checkin).diffDays(XDate.min(end, b.checkout));
+			b.weekend = false; //It might be a weekend but it will have color of its own			
 		}//Booking Class
 			
 
-	
 		//Function to return
-		var normalizer = function(buildings, start, end){
-			//Create a map to hold all the bookings referenced by their ID string
-			var bookings = {};						
-						
-			angular.forEach(buildings, function(building){
-				angular.forEach(building.resources, function(resource){
-					//Provide a pointer to the parent building				
-					resource.building = building;
-
-					//Will hold the array of days  
-					var days = [];					
-					//Get the start time in our period
-					var counter = new XDate(start);
-					
-					angular.forEach(resource.bookings, function(booking){
-						//Validate booking's dates
-						booking.checkin  = new XDate(booking.checkin  ? booking.checkin  : 1).clearTime();
-						booking.checkout = new XDate(booking.checkout ? booking.checkout : 1).clearTime();
-
-						//Provide a pointer to the parent resource
-						booking.resource = resource;
-					
-						//Skip the number of days before the booking
-						//Whichever is smaller, the number of days from now until the next booking or until the end of the period
-						var numEmptyBookings = Math.min(counter.diffDays(booking.checkin), counter.diffDays(end));
-						
-						for(var l = 0; l < numEmptyBookings; l++)
-						{
-							days.push(new EmptyBooking(counter));
-							counter.addDays(1);
-						}
-
-						//Add the booking to the list
-						var book = new Booking(booking, start, end);
-						days.push(book);
-						
-						//Add the booking to the hash map for lookup by ID.
-						bookings[booking.id]  = book;
-						
-						//Skip the number of days until the booking ends but don't make more empty bookings
-						 counter.addDays(book.nights);
-
-					});//For each booking
-
+		var normalizer = function(resource, start, end, bookingsMap){
+			//Will hold the array of days  
+			var days = [];	
+			var addDay = (function(){
+				var count = 0;
+				return function(d){
+					d.number = count;
+					count += d.nights;
+					days.push(d);
+				}
+			})();
 			
-					//while counter is before end of range
-					for(;counter.isBefore(end); counter.addDays(1))
-						days.push(new EmptyBooking(counter));
-													
-					//Assign the list of day bookings to our resource object for our model to iterate over	
-					resource.days = days;
+			//Get the start time in our period
+			var counter = new XDate(start);
+			
+			angular.forEach(resource.bookings, function(booking){
+				//Validate booking's dates
+				booking.checkin  = new XDate(booking.checkin  ? booking.checkin  : 1).clearTime();
+				booking.checkout = new XDate(booking.checkout ? booking.checkout : 1).clearTime();
 
-				});//For each resource				
+				//Provide a pointer to the parent resource
+				booking.resource = resource;
+			
+				//Skip the number of days before the booking
+				//Whichever is smaller, the number of days from now until the next booking or until the end of the period
+				var numEmptyBookings = Math.min(counter.diffDays(booking.checkin), counter.diffDays(end));
 				
-			});//For each building
+				for(var l = 0; l < numEmptyBookings; l++)
+				{
+					addDay(new EmptyBooking(counter));
+					counter.addDays(1);
+				}
 
-			
-			return {
-				buildings: buildings,
-				bookings: bookings
-			}
+				//Add the booking to the list
+				Booking(booking, start, end);
+				addDay(booking);
+				
+				//Add the booking to the hash map for lookup by ID.
+				bookingsMap[booking.id] = booking;
+				
+				//Skip the number of days until the booking ends but don't make more empty bookings
+				 counter.addDays(booking.nights);
+
+			});//For each booking
+
+	
+			//while counter is before end of range
+			for(;counter.isBefore(end); counter.addDays(1))
+				addDay(new EmptyBooking(counter));
+											
+			//Assign the list of day bookings to our resource object for our model to iterate over	
+			resource.days = days;
 		}
 		
 		//Return our function
@@ -241,8 +317,10 @@ angular.module('bookingCentral.services', ["sforceRemoting", "btford.modal"]).
 			//Calendar holder
 			var cal = [];
 			
+			var today = XDate.today().getTime();
+			
 			//Loop through every day in this range
-			for(var c = new XDate(start); c.isBefore(stop); c.addDays(1))
+			for(var c = new XDate(start).clearTime(); c.isBefore(stop); c.addDays(1))
 			{
 				//Will hold formatted strings for every day
 				var day = {};
@@ -253,6 +331,9 @@ angular.module('bookingCentral.services', ["sforceRemoting", "btford.modal"]).
 					//Add this format for the day to the calendar type
 					day[name] = c.toString(format[name]);
 				}
+				
+				//Set if date is the current day.
+				day.today = c.getTime() == today;
 				
 				//Add this day to the calendar
 				cal.push(day);
@@ -268,35 +349,24 @@ angular.module('bookingCentral.services', ["sforceRemoting", "btford.modal"]).
 	///////////////////////////////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////////////////////////////
 	factory("modal", ["btfModal", function(btfModal){
+
         return {
 	        view: btfModal({
 	            controller: "viewModalCtrl",
 	            controllerAs: "viewModalCtrl",
 	            templateUrl: "/resource/1397601890000/modalTemplate",
-	            init: function(e){
-	            	e.draggable({
-		            	handle: ".pbHeader",
-						cursor: "move",
-	            	});
-	            },
-	            beforeDestroy: function(e){
-	            	e.draggable('destroy');
-	            }
 	        }),
 		    
 		    create: btfModal({
 	            controller: "createModalCtrl",
 	            controllerAs: "createModalCtrl",
-	            templateUrl: "/resource/1397601890000/modalTemplate",
-	            init: function(e){
-	            	e.draggable({
-		            	handle: ".pbHeader",
-						cursor: "move",
-	            	});
-	            },
-	            beforeDestroy: function(e){
-	            	e.draggable('destroy');
-	            }
+	            templateUrl: "/resource/1398577356000/createBookingModal",
+	        }),
+	        
+	        changeStatus: btfModal({
+	            controller: "changeStatusModalCtrl",
+	            controllerAs: "changeStatusModalCtrl",
+	            templateUrl: "/resource/1398546842000/changeStatusModal",
 	        })
        };
 	    
